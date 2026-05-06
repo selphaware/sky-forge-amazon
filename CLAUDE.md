@@ -38,7 +38,7 @@ If a Sonnet session hits a design question or a non-trivial CDK error, escalate 
 
 The order is intentional — it lets each step be verified before the next builds on it. Do not parallelise or one-shot the whole template; the synth/test feedback loop catches design mistakes much earlier than the deploy loop.
 
-1. **Tooling foundation** — `pyproject.toml`, `requirements.txt`, `requirements-dev.txt`, `.gitignore`, `.pre-commit-config.yaml`. Verify `pre-commit run --all-files` passes on an empty repo.
+1. **Tooling foundation** — `pyproject.toml`, `requirements.txt`, `requirements-dev.txt`, `.gitignore`, `.pre-commit-config.yaml`. Verify the hooks install and run without error (most are no-ops at this stage since there's no Python source yet).
 2. **Config layer** — `infra/config_schema.py` + `infra/config_loader.py` + `tests/test_config_loader.py`. Pure Python, no AWS, no CDK. Verify `pytest` passes.
 3. **Lambda path end-to-end** — `infra/stacks/lambda_stack.py` + `infra/app.py` + `examples/lambda-minimal/` + the Lambda half of `tests/test_stack_synth.py`. Verify synth via `cdk synth` and via the synth test. **Stop here for review before continuing.**
 4. **EC2 path end-to-end** — `infra/stacks/ec2_stack.py` + `examples/ec2-minimal/` + EC2 half of synth tests. Verify synth.
@@ -78,7 +78,7 @@ python scripts/dev_server.py
 pytest
 
 # Run a single test
-pytest tests/test_config_loader.py::test_name -v
+pytest -k "stage_merge" -v
 
 # Lint/format/type-check (via pre-commit)
 pre-commit run --all-files
@@ -123,6 +123,9 @@ CDK uploads the zipped app as an S3 asset. EC2 user data: install Python 3.12, d
 ### CloudFront → S3
 Use `S3BucketOrigin.with_origin_access_control` (modern OAC), not legacy OAI. S3 bucket is private.
 
+### Route53 hosted zone
+Route53 hosted zone must exist before deploy. HostedZone.from_lookup requires the stack to have an explicit env= (account + region) set in app.py — env-agnostic stacks fail the lookup with an unhelpful error. The hosted zone for base_domain must already exist in the target account; the template does not create it.
+
 ## Tests
 
 Two test files, both must pass with no AWS credentials and complete in <30s total:
@@ -132,7 +135,7 @@ Two test files, both must pass with no AWS credentials and complete in <30s tota
 
 ## Pre-commit hooks
 
-`pre-commit install` once after clone. Hooks: standard `pre-commit-hooks` set (incl. `check-added-large-files` max 500KB), `ruff` (format + check), `mypy` strict on `infra/` and `tests/` (excludes `backend/` and `examples/` — those are user app code), `gitleaks` (critical for a deploy tool).
+`pre-commit install` once after clone. Hooks: standard `pre-commit-hooks` set (incl. `check-added-large-files` max 500KB), `ruff` (format + check), `mypy` strict on `infra/` and `tests/` (excludes `backend/` and `examples/` — those are user app code that travels with each generated project, so type-strictness there would force the template's typing choices on downstream users), `gitleaks` (critical for a deploy tool).
 
 Tooling config in `pyproject.toml`: ruff line length 100, target py312, rules `E,F,I,N,UP,B,SIM`. Mypy strict for `infra/`/`tests/`, ignore missing imports for `aws_cdk.*` if needed.
 
