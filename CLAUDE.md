@@ -21,6 +21,7 @@ Use **Opus** for design and hard work; use **Sonnet** for routine implementation
 - Designing the CDK stack structure and resource wiring for both `LambdaStack` and `Ec2Stack`
 - Anything involving CloudFront + ACM + Route53 + OAC interactions (subtle, easy to get wrong)
 - The EC2 user data script and systemd unit (one-shot, hard to debug remotely)
+- The secret bootstrap UX in `deploy.py` (idempotency, the orphan-warning logic, the scheduled-for-deletion edge case, and how the `SecretBackend` abstraction is shaped so a v2 SSM toggle is a one-line change)
 - Debugging CDK synth or deploy failures
 - Any decision that affects more than one file or trades off between approaches
 
@@ -39,10 +40,10 @@ If a Sonnet session hits a design question or a non-trivial CDK error, escalate 
 The order is intentional — it lets each step be verified before the next builds on it. Do not parallelise or one-shot the whole template; the synth/test feedback loop catches design mistakes much earlier than the deploy loop.
 
 1. **Tooling foundation** — `pyproject.toml`, `requirements.txt`, `requirements-dev.txt`, `.gitignore`, `.pre-commit-config.yaml`. Verify the hooks install and run without error (most are no-ops at this stage since there's no Python source yet).
-2. **Config layer** — `infra/config_schema.py` + `infra/config_loader.py` + `tests/test_config_loader.py`. Pure Python, no AWS, no CDK. Verify `pytest` passes.
+2. **Config layer** — `infra/config_schema.py` + `infra/config_loader.py` + `tests/test_config_loader.py`. Pure Python, no AWS, no CDK. Includes the `secrets:` schema with optional fields and a model_validator that (a) resolves the default `aws_secret_name` from `<project>`, `<stage>`, and `<name>`, and (b) checks that no two secrets across all Lambdas + EC2 collide on the resolved name within one stage. Verify `pytest` passes.
 3. **Lambda path end-to-end** — `infra/stacks/lambda_stack.py` + `infra/app.py` + `examples/lambda-minimal/` + the Lambda half of `tests/test_stack_synth.py`. Verify synth via `cdk synth` and via the synth test. **Stop here for review before continuing.**
 4. **EC2 path end-to-end** — `infra/stacks/ec2_stack.py` + `examples/ec2-minimal/` + EC2 half of synth tests. Verify synth.
-5. **Scripts** — `scripts/deploy.py`, `scripts/destroy.py`, `scripts/dev_server.py`. Each tested manually with the example configs.
+5. **Scripts** — `scripts/deploy.py`, `scripts/destroy.py`, `scripts/set_secret.py`, `scripts/dev_server.py`. Each tested manually with the example configs. `deploy.py` includes the secret bootstrap phase (§6c of the PRD): runs after the STS account check, before CDK is invoked, prompts via `getpass` for missing AWS Secrets Manager secrets and creates them, then warns about orphaned secrets (declared previously, removed now) without deleting. `set_secret.py <stage> <name>` is a thin wrapper around `boto3 secretsmanager.put_secret_value` for rotation; `--delete` calls `delete_secret` with the default 7-day recovery window after y/N confirmation.
 6. **CI + README** — `.github/workflows/ci.yml`, top-level `README.md`. Last because it documents what now exists.
 
 After each step, the repo should be in a working, testable state. If a step can't be completed without making decisions outside the PRD, stop and ask rather than guessing.
@@ -70,6 +71,10 @@ python scripts/deploy.py dev      # or prod
 
 # Destroy (prompts y/N)
 python scripts/destroy.py dev
+
+# Set / rotate / delete a secret in AWS Secrets Manager
+python scripts/set_secret.py dev DB_PASSWORD            # rotate (prompts for new value)
+python scripts/set_secret.py prod DB_PASSWORD --delete  # schedule for deletion (7-day recovery)
 
 # Local dev (no AWS calls; frontend at :3000, backend at :8000)
 python scripts/dev_server.py
@@ -108,7 +113,24 @@ CDK uses the standard AWS credential chain (env vars → `~/.aws/credentials` �
 `aws_region` must be `"us-east-1"` in v1 — explicit Pydantic validation error otherwise. Required because ACM certs for CloudFront must be in `us-east-1`.
 
 ### Secrets injection (v1 strategy)
-Both Lambda and EC2 paths fetch SSM Parameter Store values **at deploy time** and inject them as plain env vars (Lambda env vars / systemd `Environment=` directives). Rotating secrets requires redeploy. Runtime fetching is v2.
+
+Two phases: **bootstrap** + **inject**, against AWS Secrets Manager (chosen over SSM Parameter Store as the closer conceptual match to "key vault"; cost is ~$0.40/secret/month).
+
+**Bootstrap** (in `deploy.py`, before any CDK invocation): for each `secrets:` entry in the resolved config, call `secretsmanager.describe_secret` on the resolved `aws_secret_name`. Missing → prompt the user via `getpass.getpass()` (input not echoed) and `create_secret` with `Project=<project>` tag. Existing → leave untouched. Scheduled-for-deletion → abort with instructive error. Empty input or Ctrl+C → abort cleanly with nothing written. After bootstrap, list `Project=<project>`-tagged secrets and warn (don't delete) about any not in current YAML — orphans from prior declarations.
+
+**Inject** (during CDK synth/deploy): use `aws_cdk.SecretValue.secrets_manager(<aws_secret_name>)` and pass through `function.add_environment(name, secret_value.unsafe_unwrap())`. The synthesized template gets a `{{resolve:secretsmanager:...}}` dynamic reference, not the literal value — CFN resolves server-side at stack create/update. EC2 gets the same dynamic reference embedded in user data via `Fn::Sub`, resolved before user data is base64-encoded. IAM via `secret.grant_read(role)`, scoped to specific ARNs.
+
+This is materially cleaner than the equivalent SSM SecureString flow — no synth-time vs deploy-time fetch decision, no CDK context staleness concerns, no plaintext in the synthesized template.
+
+**Schema** (per entry under `secrets:`): `name` (required, must match `^[A-Z_][A-Z0-9_]*$`), `prompt` (optional, defaults to `name`), `description` (optional, defaults to `f"{name} for {project} ({stage})"`), `aws_secret_name` (optional, defaults to `<project>/<stage>/<name.lower()>`). Two entries resolving to the same Secrets Manager name within one stage is a config error.
+
+**Default name scheme intentionally includes stage** (`<project>/<stage>/<name.lower()>`). Prod and dev get distinct secrets — user is prompted once per stage on first deploy of that stage. Prevents dev mistakes from corrupting prod resources. To share a value across stages, override `aws_secret_name` per-stage in the stage block.
+
+**Manual rotation/cleanup**: `python scripts/set_secret.py <stage> <name>` rotates; `--delete` schedules deletion with 7-day recovery. Both require y/N confirmation for destructive operations.
+
+**Local dev does NOT inject secrets.** `dev_server.py` runs offline; users handle local secret values in their own app code (gitignored `.env` in their backend folder, or `STAGE=local`-guarded test values). Documented in README.
+
+**Cost-sensitive escape hatch**: the schema/loader abstraction should make swapping Secrets Manager → SSM Parameter Store a v2 config flag. Don't bake `secretsmanager` strings into the loader's public types — wrap them in a `SecretBackend` enum even if it only has one value in v1.
 
 ### Lambda packaging
 Use `aws_lambda.Code.from_asset` with bundling that runs `pip install -r requirements.txt -t /asset-output && cp -r . /asset-output` inside `Runtime.PYTHON_3_12.bundling_image`. Docker Desktop must be running locally for this.
