@@ -1,0 +1,38 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.5.7
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.11.1
+    hooks:
+      - id: mypy
+        # Mirror the CLI invocation `mypy infra tests` so both produce identical
+        # output. Without `pass_filenames: false` the hook would forward changed
+        # files individually, which can silently differ from the directory-based
+        # invocation. `--config-file` ensures pyproject.toml drives both.
+        pass_filenames: false
+        args: ["--config-file=pyproject.toml", "infra", "tests"]
+        additional_dependencies:
+          - pydantic>=2.7.0
+          - types-PyYAML>=6.0.0
+          - boto3-stubs[secretsmanager,sts]>=1.34.0
+          - pytest>=8.0.0
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.4
+    hooks:
+      - id: gitleaks

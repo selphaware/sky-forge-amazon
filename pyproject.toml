@@ -1,0 +1,37 @@
+[project]
+name = "sky-forge-amazon"
+version = "0.1.0"
+description = "Reusable AWS deployment template for static frontend + Python backend"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["infra", "tests"]
+exclude = ["backend/", "examples/", "env_sky/", "cdk.out/"]
+
+[[tool.mypy.overrides]]
+module = ["aws_cdk.*", "constructs.*"]
+ignore_missing_imports = true
+
+# Tests use pytest's dynamic decorators (@pytest.fixture, @pytest.mark.parametrize),
+# which older mypy versions don't recognize as typed. Strict typing on the test
+# bodies themselves is preserved — only the decorator check is relaxed.
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_decorators = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+pythonpath = ["."]

@@ -220,3 +220,24 @@ __marimo__/
 env_sky/
 
 latest.claude
+
+# CDK
+cdk.out/
+.cdk.staging/
+
+# Node (for cdk CLI installed locally, if any)
+node_modules/
+
+# Generated frontend config (written by deploy.py / dev_server.py)
+**/config.js
+**/config.local.js
+
+# Local secrets (per backend)
+.env
+*.env
+
+# IDE
+.vscode/
+.idea/
+
+.claude
