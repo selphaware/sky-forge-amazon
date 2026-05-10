@@ -14,6 +14,7 @@ import aws_cdk as cdk
 
 from infra.config_loader import load_config
 from infra.config_schema import Stage
+from infra.stacks.ec2_stack import Ec2Stack
 from infra.stacks.lambda_stack import LambdaStack
 
 
@@ -38,10 +39,10 @@ def main() -> None:
 
     if cfg.backend.type == "lambda":
         LambdaStack(app, stack_name, cfg=cfg, env=env, bundle_lambdas=bundle_lambdas)
+    elif cfg.backend.type == "ec2":
+        Ec2Stack(app, stack_name, cfg=cfg, env=env)
     else:
-        raise SystemExit(
-            f"backend.type='{cfg.backend.type}' not yet supported (Ec2Stack lands in step 4)"
-        )
+        raise SystemExit(f"backend.type='{cfg.backend.type}' is not supported")
 
     app.synth()
 

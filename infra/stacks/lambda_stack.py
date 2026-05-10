@@ -1,8 +1,4 @@
-"""LambdaStack: CDK stack for the Lambda backend variant.
-
-Frontend leg (S3 + CloudFront + Route53 + ACM) is inlined here for v1; refactor
-to a shared base when Ec2Stack lands and the actual reuse shape is known.
-"""
+"""LambdaStack: CDK stack for the Lambda backend variant."""
 
 from __future__ import annotations
 
@@ -12,25 +8,21 @@ import aws_cdk as cdk
 from aws_cdk import (
     CfnOutput,
     Duration,
-    RemovalPolicy,
     SecretValue,
     Stack,
     Tags,
 )
 from aws_cdk import aws_apigateway as apigateway
 from aws_cdk import aws_certificatemanager as acm
-from aws_cdk import aws_cloudfront as cloudfront
-from aws_cdk import aws_cloudfront_origins as origins
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_route53 as route53
 from aws_cdk import aws_route53_targets as route53_targets
-from aws_cdk import aws_s3 as s3
-from aws_cdk import aws_s3_deployment as s3_deployment
 from aws_cdk import aws_secretsmanager as secretsmanager
 from constructs import Construct
 
 from infra.config_schema import DeployConfig, LambdaBackend, LambdaConfig
+from infra.stacks.frontend_construct import FrontendConstruct, frontend_domain, record_name
 
 
 class LambdaStack(Stack):
@@ -53,8 +45,8 @@ class LambdaStack(Stack):
         Tags.of(self).add("Project", cfg.project)
         Tags.of(self).add("Stage", cfg.stage)
 
-        frontend_domain = self._frontend_domain(cfg)
-        api_domain = f"api.{frontend_domain}"
+        fe_domain = frontend_domain(cfg)
+        api_domain = f"api.{fe_domain}"
 
         zone = (
             hosted_zone
@@ -62,81 +54,11 @@ class LambdaStack(Stack):
             else route53.HostedZone.from_lookup(self, "HostedZone", domain_name=cfg.base_domain)
         )
 
-        self._build_frontend(cfg, frontend_domain, zone)
+        FrontendConstruct(self, "Frontend", cfg=cfg, zone=zone)
         self._build_api(cfg, api_domain, zone, bundle_lambdas)
 
-        CfnOutput(self, "FrontendUrl", value=f"https://{frontend_domain}")
+        CfnOutput(self, "FrontendUrl", value=f"https://{fe_domain}")
         CfnOutput(self, "ApiUrl", value=f"https://{api_domain}")
-
-    # ------------------------------------------------------------------ #
-    # Frontend                                                           #
-    # ------------------------------------------------------------------ #
-
-    def _build_frontend(
-        self,
-        cfg: DeployConfig,
-        frontend_domain: str,
-        zone: route53.IHostedZone,
-    ) -> None:
-        bucket = s3.Bucket(
-            self,
-            "FrontendBucket",
-            block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
-            encryption=s3.BucketEncryption.S3_MANAGED,
-            removal_policy=RemovalPolicy.RETAIN,
-            enforce_ssl=True,
-        )
-
-        cert = acm.Certificate(
-            self,
-            "FrontendCert",
-            domain_name=frontend_domain,
-            validation=acm.CertificateValidation.from_dns(zone),
-        )
-
-        error_responses: list[cloudfront.ErrorResponse] = []
-        if cfg.frontend.error_document:
-            for status in (403, 404):
-                error_responses.append(
-                    cloudfront.ErrorResponse(
-                        http_status=status,
-                        response_http_status=status,
-                        response_page_path=f"/{cfg.frontend.error_document}",
-                    )
-                )
-
-        distribution = cloudfront.Distribution(
-            self,
-            "FrontendDistribution",
-            default_behavior=cloudfront.BehaviorOptions(
-                origin=origins.S3BucketOrigin.with_origin_access_control(bucket),
-                viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
-                allowed_methods=cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
-                cache_policy=cloudfront.CachePolicy.CACHING_OPTIMIZED,
-            ),
-            domain_names=[frontend_domain],
-            certificate=cert,
-            default_root_object=cfg.frontend.index_document,
-            error_responses=error_responses or None,
-            minimum_protocol_version=cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
-        )
-
-        s3_deployment.BucketDeployment(
-            self,
-            "FrontendDeployment",
-            sources=[s3_deployment.Source.asset(cfg.frontend.source_path)],
-            destination_bucket=bucket,
-            distribution=distribution,
-            distribution_paths=["/*"],
-        )
-
-        route53.ARecord(
-            self,
-            "FrontendRecord",
-            zone=zone,
-            record_name=self._record_name(cfg.project, cfg.stage),
-            target=route53.RecordTarget.from_alias(route53_targets.CloudFrontTarget(distribution)),
-        )
 
     # ------------------------------------------------------------------ #
     # API                                                                #
@@ -149,7 +71,7 @@ class LambdaStack(Stack):
         zone: route53.IHostedZone,
         bundle_lambdas: bool,
     ) -> None:
-        assert isinstance(cfg.backend, LambdaBackend)  # narrowed by caller; satisfies mypy
+        assert isinstance(cfg.backend, LambdaBackend)
 
         api_cert = acm.Certificate(
             self,
@@ -158,7 +80,6 @@ class LambdaStack(Stack):
             validation=acm.CertificateValidation.from_dns(zone),
         )
 
-        # Build a separate DomainName resource and attach to the RestApi after.
         api_domain_name = apigateway.DomainName(
             self,
             "ApiDomain",
@@ -167,7 +88,6 @@ class LambdaStack(Stack):
             endpoint_type=apigateway.EndpointType.REGIONAL,
         )
 
-        # Build all Lambda functions and per-function secret/IAM wiring.
         funcs: list[tuple[LambdaConfig, lambda_.Function]] = []
         for lam in cfg.backend.lambdas:
             fn = lambda_.Function(
@@ -187,13 +107,10 @@ class LambdaStack(Stack):
                     iam.PolicyStatement(actions=grant.actions, resources=grant.resources)
                 )
             for sec in lam.secrets:
-                # aws_secret_name is filled in by the schema's post-validator.
                 assert sec.aws_secret_name is not None
-                # Grant read on the specific secret ARN (no wildcards).
                 sm = secretsmanager.Secret.from_secret_name_v2(
                     self, f"Sec-{lam.name}-{sec.name}", sec.aws_secret_name
                 )
-                # CFN dynamic reference — value is resolved server-side at deploy time.
                 fn.add_environment(
                     sec.name,
                     SecretValue.secrets_manager(sec.aws_secret_name).unsafe_unwrap(),
@@ -201,8 +118,6 @@ class LambdaStack(Stack):
                 if fn.role is not None:
                     sm.grant_read(fn.role)
             funcs.append((lam, fn))
-
-        # ----- API construct selection ----- #
 
         cors_opts: apigateway.CorsOptions | None = None
         if cfg.security.cors.allowed_origins:
@@ -262,28 +177,24 @@ class LambdaStack(Stack):
                 for segment in lam.route_prefix.strip("/").split("/"):
                     if segment:
                         resource = resource.add_resource(segment)
-                # /users itself
                 resource.add_method("ANY", apigateway.LambdaIntegration(fn))
-                # /users/{proxy+}
                 resource.add_proxy(
                     default_integration=apigateway.LambdaIntegration(fn),
                     any_method=True,
                 )
 
-        # Map the custom domain to this RestApi's deployment stage.
         api_domain_name.add_base_path_mapping(rest_api)
 
         route53.ARecord(
             self,
             "ApiRecord",
             zone=zone,
-            record_name=self._record_name(cfg.project, cfg.stage, prefix="api."),
+            record_name=record_name(cfg.project, cfg.stage, prefix="api."),
             target=route53.RecordTarget.from_alias(
                 route53_targets.ApiGatewayDomain(api_domain_name)
             ),
         )
 
-        # ----- Optional API key + UsagePlan ----- #
         if cfg.security.api_key_required:
             api_key = apigateway.ApiKey(
                 self,
@@ -299,8 +210,6 @@ class LambdaStack(Stack):
                 ],
             )
             usage_plan.add_api_key(api_key)
-            # Output the ID only. deploy.py fetches the value via apigateway.get_api_key
-            # post-deploy and writes it into frontend/config.js.
             CfnOutput(
                 self,
                 "ApiKeyId",
@@ -316,19 +225,6 @@ class LambdaStack(Stack):
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _frontend_domain(cfg: DeployConfig) -> str:
-        if cfg.stage == "prod":
-            return f"{cfg.project}.{cfg.base_domain}"
-        return f"{cfg.project}.dev.{cfg.base_domain}"
-
-    @staticmethod
-    def _record_name(project: str, stage: str, prefix: str = "") -> str:
-        # Route53 record_name is the part *before* the hosted zone's base domain.
-        if stage == "prod":
-            return f"{prefix}{project}"
-        return f"{prefix}{project}.dev"
-
-    @staticmethod
     def _make_code(source_path: str, *, bundle: bool) -> lambda_.Code:
         if bundle:
             return lambda_.Code.from_asset(
@@ -342,6 +238,4 @@ class LambdaStack(Stack):
                     ],
                 ),
             )
-        # Test-only path: skip Docker bundling. Synthesizes the same shape, asset
-        # content differs (no installed deps).
         return lambda_.Code.from_asset(source_path)
