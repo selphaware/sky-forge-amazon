@@ -17,7 +17,7 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM"]
 [tool.mypy]
 python_version = "3.12"
 strict = true
-files = ["infra", "tests"]
+files = ["infra", "tests", "scripts"]
 exclude = ["backend/", "examples/", "env_sky/", "cdk.out/"]
 # aws_cdk is typed as Any (no stubs / ignore_missing_imports). Subclassing CDK
 # Stack/Construct is intentional and pervasive; mypy 2.0 is fine with this but
@@ -34,6 +34,13 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_decorators = false
+
+# Scripts call boto3 for services without installed stubs (cloudformation, apigateway).
+# Those clients return Any; relaxing warn_return_any avoids noisy false positives
+# while keeping all other strict checks active.
+[[tool.mypy.overrides]]
+module = "scripts.*"
+warn_return_any = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -25,7 +25,7 @@ repos:
         # files individually, which can silently differ from the directory-based
         # invocation. `--config-file` ensures pyproject.toml drives both.
         pass_filenames: false
-        args: ["--config-file=pyproject.toml", "infra", "tests"]
+        args: ["--config-file=pyproject.toml", "infra", "tests", "scripts"]
         additional_dependencies:
           - pydantic>=2.7.0
           - types-PyYAML>=6.0.0

@@ -325,4 +325,4 @@ class Ec2Stack(Stack):
         )
         # CDK wraps this token in Fn::Base64 automatically when attached to the
         # LaunchTemplate — do NOT call cdk.Fn.base64() here.
-        return cast(str, cdk.Fn.sub(template, sub_vars))
+        return cast(str, cdk.Fn.sub(template, sub_vars))  # type: ignore[redundant-cast,unused-ignore]
