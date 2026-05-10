@@ -231,6 +231,8 @@ node_modules/
 # Generated frontend config (written by deploy.py / dev_server.py)
 **/config.js
 **/config.local.js
+# ...except the example, which ships as a template starting point
+!examples/**/config.local.js
 
 # Local secrets (per backend)
 .env

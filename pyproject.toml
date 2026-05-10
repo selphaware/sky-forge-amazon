@@ -19,6 +19,10 @@ python_version = "3.12"
 strict = true
 files = ["infra", "tests"]
 exclude = ["backend/", "examples/", "env_sky/", "cdk.out/"]
+# aws_cdk is typed as Any (no stubs / ignore_missing_imports). Subclassing CDK
+# Stack/Construct is intentional and pervasive; mypy 2.0 is fine with this but
+# the older pre-commit-pinned mypy 1.11 flags every CDK subclass as misc.
+disallow_subclassing_any = false
 
 [[tool.mypy.overrides]]
 module = ["aws_cdk.*", "constructs.*"]

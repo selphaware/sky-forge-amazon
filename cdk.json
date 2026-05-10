@@ -1,0 +1,16 @@
+{
+  "app": "python -m infra.app",
+  "watch": {
+    "include": ["**"],
+    "exclude": [
+      "env_sky/**",
+      "node_modules/**",
+      "cdk.out/**",
+      ".git/**",
+      "**/__pycache__/**",
+      "**/.pytest_cache/**",
+      "**/.mypy_cache/**",
+      "**/.ruff_cache/**"
+    ]
+  }
+}

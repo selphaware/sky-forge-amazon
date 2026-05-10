@@ -1,0 +1,27 @@
+project: lambda-minimal
+base_domain: example.com         # placeholder — change to your Route53 zone
+aws_account: "000000000000"      # placeholder — change to your account
+aws_region: us-east-1
+
+frontend:
+  source_path: ./frontend
+
+backend:
+  type: lambda
+  lambdas:
+    - name: api
+      source_path: ./backend/api
+      handler: handler.handler
+      route_prefix: /
+
+security:
+  cors:
+    allowed_origins:
+      - https://lambda-minimal.example.com
+
+stages:
+  prod: {}
+  dev:
+    security:
+      cors:
+        allowed_origins: ["*"]

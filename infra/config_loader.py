@@ -59,18 +59,47 @@ def load_config(
     *,
     validate_paths: bool = True,
 ) -> DeployConfig:
-    """Load deploy.yaml, apply stage merge, validate, optionally check source paths exist."""
+    """Load deploy.yaml, apply stage merge, validate, resolve source paths to absolute,
+    optionally check they exist on disk.
+    """
     raw = load_yaml(yaml_path)
     merged = apply_stage_merge(raw, stage)
     merged["stage"] = stage  # loader-injected; the schema's post-validator reads it
     cfg = DeployConfig.model_validate(merged)
 
+    # Use .absolute() not .resolve() — on Windows with substituted/mapped drives,
+    # .resolve() dereferences to a UNC path (e.g. \\localhost\e$\...) which Docker
+    # refuses to mount during Lambda asset bundling.
+    base_dir = yaml_path.absolute().parent
+    _resolve_paths(cfg, base_dir)
     if validate_paths:
-        _validate_paths_exist(cfg, yaml_path.parent)
+        _validate_paths_exist(cfg)
     return cfg
 
 
-def _validate_paths_exist(cfg: DeployConfig, base_dir: Path) -> None:
+def _abs(base_dir: Path, raw_path: str) -> str:
+    p = Path(raw_path)
+    if p.is_absolute():
+        return str(p)
+    # os.path.normpath cleans up `./` and `../` segments without dereferencing.
+    import os
+
+    return os.path.normpath(str(base_dir / p))
+
+
+def _resolve_paths(cfg: DeployConfig, base_dir: Path) -> None:
+    """Mutate cfg in place: rewrite every source_path to its absolute form so CDK
+    can use it regardless of cwd.
+    """
+    cfg.frontend.source_path = _abs(base_dir, cfg.frontend.source_path)
+    if isinstance(cfg.backend, LambdaBackend):
+        for lam in cfg.backend.lambdas:
+            lam.source_path = _abs(base_dir, lam.source_path)
+    elif isinstance(cfg.backend, Ec2Backend):
+        cfg.backend.ec2.source_path = _abs(base_dir, cfg.backend.ec2.source_path)
+
+
+def _validate_paths_exist(cfg: DeployConfig) -> None:
     paths_to_check: list[tuple[str, str]] = [
         ("frontend.source_path", cfg.frontend.source_path),
     ]
@@ -80,10 +109,6 @@ def _validate_paths_exist(cfg: DeployConfig, base_dir: Path) -> None:
     elif isinstance(cfg.backend, Ec2Backend):
         paths_to_check.append(("backend.ec2.source_path", cfg.backend.ec2.source_path))
 
-    for field, raw_path in paths_to_check:
-        p = Path(raw_path)
-        resolved = p if p.is_absolute() else (base_dir / p)
-        if not resolved.exists():
-            raise FileNotFoundError(
-                f"{field}: '{raw_path}' does not exist (resolved to {resolved})"
-            )
+    for field, abs_path in paths_to_check:
+        if not Path(abs_path).exists():
+            raise FileNotFoundError(f"{field}: '{abs_path}' does not exist")
